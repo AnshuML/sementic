@@ -1,0 +1,8 @@
+venv/
+__pycache__/
+*.pyc
+.env
+data/accuracy_audit_results.csv
+data/debug_import.py
+data/test_results/
+logs/

@@ -11,3 +11,5 @@ Optimized semantic search system for MoSPI eSankhyiki portal data, achieving **1
 1. Clone the repository.
 2. Install dependencies: `pip install flask flask-cors sentence-transformers faiss-cpu`.
 3. Run the engine: `python sementic.py`.
+.\venv\python.exe data\production_audit_runner.py
+

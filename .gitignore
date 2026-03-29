@@ -6,3 +6,9 @@ data/accuracy_audit_results.csv
 data/debug_import.py
 data/test_results/
 logs/
+.cache/
+audit_log_temp.txt
+data/audit_results.txt
+data/last_audit_output.txt
+fails.txt
+production_results.txt

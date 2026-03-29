@@ -1203,11 +1203,11 @@ try:
         base_url="http://localhost:11434",
         temperature=0.3
     )
-
     rewriter_llm.invoke("ping")
+    OLLAMA_IS_RUNNING = True
     print(" Ollama is running")
-
 except Exception as e:
+    OLLAMA_IS_RUNNING = False
     print(" Ollama is not running")
 
 
@@ -1295,7 +1295,7 @@ STRICT RULES:
 7. NEVER add sector/gender/state unless explicitly present
 8. Output ONLY rewritten query
 9. No explanation
-10. If the query contains a known dataset short form (CPI, IIP, NAS, PLFS, ASI, HCES, NSS, EC, WPI), append its full form in the rewritten query while keeping the short form unchanged (e.g., "CPI" → "CPI Consumer Price Index", "EC" → "EC Economic Census", "WPI" → "WPI Wholesale Price Index"), and do not expand anything not explicitly present.
+10. If the query contains a known dataset short form (CPI, IIP, NAS, PLFS, ASI, HCES, NSS, EC, WPI, UDISE, ASUSE, Gender, AISHE, ESI, CPIALRL, ENVSTAT, NFHS, RBI, NSS79, NSS79C, EC4, EC5, EC6, NSS77, NSS78), append its full form in the rewritten query while keeping the short form unchanged (e.g., "CPI" → "CPI Consumer Price Index", "EC" → "EC Economic Census", "WPI" → "WPI Wholesale Price Index", "UDISE" → "UDISE Unified District Information System for Education Plus"), and do not expand anything not explicitly present.
 
 
 
@@ -1327,8 +1327,8 @@ ALLOWED OPERATIONS:
 
 CRITICAL RULE (VERY IMPORTANT):
 - If the user query is ONLY a dataset or product name
-  (examples: IIP, CPI, CPIALRL, HCES, ASI, NAS, PLFS, CPI2, EC, EC4, EC5, EC6, WPI),
-  then: "EC" → "EC Economic Census" (matches EC4/EC5/EC6); "WPI" → "WPI Wholesale Price Index"; others RETURN AS IS.
+  (examples: IIP, CPI, CPIALRL, HCES, ASI, NAS, PLFS, CPI2, EC, EC4, EC5, EC6, WPI, UDISE, ASUSE, Gender, AISHE, ESI, ENVSTAT, NFHS, RBI, NSS79, NSS79C, NSS77, NSS78),
+  then: RETURN THE QUERY WITH ITS FULL FORM APPENDED (e.g. "EC4" -> "EC4 4th Economic Census").
 - Dataset names must NEVER be replaced with normal English words.
 
 
@@ -1375,6 +1375,9 @@ RAW: "factory output in mumbai"
 User Query:
 "{user_query}"
 """
+    if not OLLAMA_IS_RUNNING:
+        return user_query
+    
     try:
         out = rewriter_llm.invoke(prompt).content.strip()
         out = out.replace('"', '').replace("\n", " ").strip()
@@ -1456,11 +1459,25 @@ ESSENTIAL_FILTERS_BY_DATASET = {
     "TUS": ["Age Group", "ICATUS Activity", "Day Of Week"],
     "WPI": ["Base_Year", "Major Group", "Group"],
     "ESI": ["Use of Energy Balance", "Energy Commodities"],
+    "ASUSE": ["Frequency", "Sector"],
+    "Gender": ["Gender", "State"],
+    "AISHE": ["University Type", "State"],
+    "NSS77": ["Sector", "State"],
+    "NSS78": ["Sector", "State"],
+    "HCES": ["Sector", "State"],
+    "ENVSTAT": ["Category", "State"],
+    "NFHS": ["Indicator Category", "State"],
+    "EC4": ["State", "Sector", "Establishment Type"],
+    "EC5": ["State", "Sector", "Establishment Type"],
+    "EC6": ["State", "Sector", "Establishment Type"],
+    "RBI": ["Bank Name", "Frequency"],
+    "NSS79": ["Sector", "State"],
+    "NSS79C": ["Sector", "State"],
+    "UDISE": ["Management", "School Category", "State"],
 }
 
 # Datasets where Year/financial_Year filter should NOT be forced
-# These datasets either don't have Year in their filters, or Year values are non-standard
-_SKIP_YEAR_FILTER_DATASETS = {"NSS77", "NSS78"}
+_SKIP_YEAR_FILTER_DATASETS = {"NSS77", "NSS78", "EC4", "EC5", "EC6"}
 
 
 def _priority_order_for_dataset(parent_code):
@@ -1889,6 +1906,30 @@ def select_best_filter_option(query, filter_name, options, cross_encoder):
         }
 
     # =========================
+    # PRODUCT-SPECIFIC FILTERS (Isolation)
+    # =========================
+    if fname_lower in ["management", "school category"]:
+        # UDISE specific
+        for opt in options:
+            if str(opt.get("option", "")).lower() in q_lower:
+                return opt
+    if fname_lower in ["university type", "name of univ type"]:
+        # AISHE specific
+        for opt in options:
+            if str(opt.get("option", "")).lower() in q_lower:
+                return opt
+    if fname_lower == "indicator category":
+        # ENVSTAT, NFHS specific
+        for opt in options:
+            if str(opt.get("option", "")).lower() in q_lower:
+                return opt
+    if fname_lower in ["major group", "group"]:
+        # WPI specific
+        for opt in options:
+            if str(opt.get("option", "")).lower() in q_lower:
+                return opt
+
+    # =========================
     # OTHER FILTERS
     # =========================
     mentioned = []
@@ -1912,11 +1953,14 @@ def select_best_filter_option(query, filter_name, options, cross_encoder):
         scores = cross_encoder.predict(pairs)
         return mentioned[int(np.argmax(scores))]
 
-    return {
-        "parent": options[0]["parent"],
-        "filter_name": filter_name,
-        "option": "Select All"
-    }
+    # Golden rule: Find the best default "All" option if no specific match
+    for opt in options:
+        o_lower = str(opt.get("option", "")).lower().strip()
+        if o_lower in ["select all", "selectall", "all", "person", "combined", "general", "total"] or o_lower.startswith("all "):
+            return opt
+            
+    # As a last resort, just return the first available valid option instead of a fake string
+    return options[0]
 
 
 # ================================
@@ -1982,7 +2026,10 @@ if USE_QDRANT:
 names = [clean_text(i["name"]) for i in INDICATORS]
 descs = [clean_text(i.get("desc", "")) for i in INDICATORS]
 
-embeddings = (0.4 * bi_encoder.encode(names, convert_to_numpy=True) + 0.6 * bi_encoder.encode(descs, convert_to_numpy=True))
+print("[INFO] Building FAISS semantic embeddings for 1360 indicators... (Takes 1-2 mins on CPU)")
+embeddings_names = bi_encoder.encode(names, convert_to_numpy=True, show_progress_bar=True)
+embeddings_descs = bi_encoder.encode(descs, convert_to_numpy=True, show_progress_bar=True)
+embeddings = (0.4 * embeddings_names + 0.6 * embeddings_descs)
 embeddings /= np.linalg.norm(embeddings, axis=1, keepdims=True)
 
 if USE_QDRANT and qclient:
@@ -2100,149 +2147,97 @@ def predict():
     #  LLM rewrite
     q = rewrite_query_with_llm(raw_q)
 
-    # Fallback: expand dataset short names for better semantic search
-    q_lower = q.lower()
-    if re.search(r'\bec\b', q_lower) and not any(x in q_lower for x in ["economic census", "ec4", "ec5", "ec6"]):
-        q = q + " Economic Census"
-    if re.search(r'\bwpi\b', q_lower) and not any(x in q_lower for x in ["wholesale price", "wholesale price index"]):
-        q = q + " Wholesale Price Index"
-    if re.search(r'\baishe\b', q_lower) and "higher education" not in q_lower:
-        q = q + " All India Survey on Higher Education"
-    if re.search(r'\bnfhs\b', q_lower) and "family health" not in q_lower:
-        q = q + " National Family Health Survey"
-    if re.search(r'\bnss', q_lower) and "national sample" not in q_lower:
-        q = q + " National Sample Survey"
+    # 1. Fallback Expansions for all 22 products
+    dataset_expansions = {
+        r'\bplfs\b': "Periodic Labour Force Survey",
+        r'\basuse\b': "Annual Survey of Unincorporated Sector Enterprises",
+        r'\basi\b': "Annual Survey of Industries",
+        r'\btus\b': "Time Use Survey",
+        r'\bgender\b': "Gender Statistics",
+        r'\baishe\b': "All India Survey on Higher Education",
+        r'\bnss77\b': "NSS 77th Round AIDIS",
+        r'\bnss78\b': "NSS 78th Round Domestic Tourism",
+        r'\besi\b': "Energy Statistics India",
+        r'\bcpialrl\b': "Consumer Price Index for Agricultural and Rural Labourers",
+        r'\bhces\b': "Household Consumption Expenditure Survey",
+        r'\benvstat\b': "Environment Statistics India",
+        r'\bnfhs\b': "National Family Health Survey",
+        r'\bec4\b': "4th Economic Census",
+        r'\bec5\b': "5th Economic Census",
+        r'\bec6\b': "6th Economic Census",
+        r'\biip\b': "Index of Industrial Production",
+        r'\bwpi\b': "Wholesale Price Index",
+        r'\bcpi\b': "Consumer Price Index",
+        r'\bnas\b': "National Accounts Statistics",
+        r'\brbi\b': "Reserve Bank of India Banking Statistics",
+        r'\bnss79c?\b': "Comprehensive Annual Modular Survey CAMS",
+        r'\budise\b': "Unified District Information System for Education Plus"
+    }
+    for pat, exp in dataset_expansions.items():
+        if re.search(pat, q.lower()) and exp.lower() not in q.lower():
+            q = f"{q} {exp}"
 
     print("RAW :", raw_q)
     print("LLM :", q)
 
     top_results = search_indicators(q)
 
-    # Force-include EC: if user asked for EC (or "economic census") but no EC4/EC5/EC6 in results, add best EC match
-    _ec_like = ("economic" in raw_q.lower() and "census" in raw_q.lower()) or bool(re.search(r'\bec\b', raw_q.lower()))
-    ec_wanted = _ec_like and not any(x in raw_q.lower() for x in ["ec4", "ec5", "ec6"])
-    ec_in_results = any(r["parent"] in ("EC4", "EC5", "EC6") for r in top_results)
-    if ec_wanted and not ec_in_results:
-        ec_best = _search_ec_only(q or raw_q)
-        if ec_best:
-            top_results = [ec_best] + [r for r in top_results if r["parent"] != ec_best["parent"]][:2]
-            ec_best["score"] = max(r["score"] for r in top_results) + 1  # 95% confidence
-
-    # Force-include WPI: if user asked for WPI (or "wholesale price") but no WPI in results, add best WPI match
-    _wpi_like = re.search(r'\bwpi\b', raw_q.lower()) or ("wholesale" in raw_q.lower() and "price" in raw_q.lower())
-    wpi_wanted = _wpi_like
-    wpi_in_results = any(r["parent"] == "WPI" for r in top_results)
-    if wpi_wanted and not wpi_in_results:
-        wpi_best = _search_wpi_only(q or raw_q)
-        if wpi_best:
-            top_results = [wpi_best] + [r for r in top_results if r["parent"] != wpi_best["parent"]][:2]
-            wpi_best["score"] = max(r["score"] for r in top_results) + 1  # 95% confidence
-
-    # Force-include when user searched by dataset name but it's not in results
+    # 2. Force-Inclusion Logic (Isolation) - STRIcT CONTEXT
+    _force_ds_map = {
+        r'\bplfs\b|unemployment rate|labour force|lfpr|wpr|\bworker population ratio\b': ["PLFS"],
+        r'\basuse\b|unincorporated|unorganized': ["ASUSE"],
+        r'\basi\b|annual survey of industries|factory output|fixed capital|gross output|workers in factory': ["ASI"],
+        r'\btus\b|time use survey|unpaid caregiving|domestic services': ["TUS"],
+        r'\bgender\b|sex ratio': ["Gender"],
+        r'\baishe\b|higher education|college|university': ["AISHE"],
+        r'\bnss77\b|debt|investment|land|livestock': ["NSS77"],
+        r'\bnss78\b|tourism': ["NSS78"],
+        r'\besi\b|energy statistics|electricity|power supply': ["ESI"],
+        r'\bcpialrl\b|agricultural labo|rural labo': ["CPIALRL"],
+        r'\bhces\b|consumption expenditure|mpce': ["HCES"],
+        r'\benvstat\b|environment statistics|forest cover|hazardous waste': ["ENVSTAT"],
+        r'\bnfhs\b|family health|immunization|fertility|antenatal care|stunted|wasted|anemia': ["NFHS"],
+        r'\bec4\b|4th economic census': ["EC4"],
+        r'\bec5\b|5th economic census': ["EC5"],
+        r'\bec6\b|6th economic census': ["EC6"],
+        r'\biip\b|industrial production|mining index|manufacturing index|electricity index': ["IIP"],
+        r'\bwpi\b|wholesale price': ["WPI"],
+        r'\bcpi\b|consumer price|retail price|retail inflation': ["CPI", "CPI2"],
+        r'\bnas\b|national accounts|gdp|gva': ["NAS"],
+        r'\brbi\b|reserve bank|lending rate|exchange rate|forex|external debt|rupee vis-a-vis': ["RBI"],
+        r'\bnss79c?\b|cams|modular survey': ["NSS79C", "NSS79"],
+        r'\budise\b|school education|unified district': ["UDISE"]
+    }
+    
     _raw_lower = raw_q.lower().strip()
-    _force_ds = None
-    if re.search(r'\bnss77\b', _raw_lower):
-        _force_ds = ["NSS77"]
-    elif re.search(r'\bnss78\b', _raw_lower):
-        _force_ds = ["NSS78"]
-    elif re.search(r'\bnss79\b', _raw_lower) or re.search(r'\bnss79c\b', _raw_lower):
-        _force_ds = ["NSS79C"]
-    elif re.search(r'\bnss\b', _raw_lower):
-        _force_ds = ["NSS77", "NSS78", "NSS79C"]
-    elif re.search(r'\bnfhs\b', _raw_lower):
-        _force_ds = ["NFHS"]
-    elif re.search(r'\baishe\b', _raw_lower):
-        _force_ds = ["AISHE"]
-    elif re.search(r'\bcpi\b', _raw_lower):
-        _force_ds = ["CPI", "CPI2"]
-    elif re.search(r'\bplfs\b', _raw_lower) or "lfpr" in _raw_lower:
-        _force_ds = ["PLFS"]
-    elif re.search(r'\basi\b', _raw_lower) or "annual survey of industries" in _raw_lower:
-        _force_ds = ["ASI"]
-    elif re.search(r'\bnas\b', _raw_lower) or "national accounts" in _raw_lower:
-        _force_ds = ["NAS"]
-    elif re.search(r'\basuse\b', _raw_lower):
-        _force_ds = ["ASUSE"]
-    elif re.search(r'\besi\b', _raw_lower) or "energy statistics" in _raw_lower:
-        _force_ds = ["ESI"]
-    elif re.search(r'\bcpialrl\b', _raw_lower) or "agricultural labourers" in _raw_lower:
-        _force_ds = ["CPIALRL"]
-    elif re.search(r'\bhces\b', _raw_lower) or "consumption expenditure" in _raw_lower:
-        _force_ds = ["HCES"]
-    elif re.search(r'\benvstat\b', _raw_lower) or "environment statistics" in _raw_lower:
-        _force_ds = ["ENVSTAT"]
-    if _force_ds and not any(r["parent"] in _force_ds for r in top_results):
-        ds_best = _search_dataset_only(q or raw_q, _force_ds)
+    _forced = None
+    # Check for specific codes first
+    for pat, codes in _force_ds_map.items():
+        if re.search(pat, _raw_lower):
+            _forced = codes
+            break
+            
+    if _forced and not any(r["parent"] in _forced for r in top_results):
+        ds_best = _search_dataset_only(q or raw_q, _forced)
         if ds_best:
             top_results = [ds_best] + [r for r in top_results if r["parent"] != ds_best["parent"]][:2]
-            ds_best["score"] = max(r["score"] for r in top_results) + 1  # 95% confidence
+            ds_best["score"] = max(r["score"] for r in top_results) + 1  # Boost to 1st
 
-    # Prioritize dataset to 1st when user searched by dataset name - all 23 datasets, 95% confidence
-    _raw_lower = raw_q.lower().strip()
+    # 3. Prioritization Logic (Isolation)
+    # If the user query matches a dataset pattern, ensure it is ranked first
     _ds_priority = None
-    # Specific codes first (nss77 before nss, ec4 before ec, etc.)
-    if re.search(r'\bnss77\b', _raw_lower):
-        _ds_priority = ["NSS77"]
-    elif re.search(r'\bnss78\b', _raw_lower):
-        _ds_priority = ["NSS78"]
-    elif re.search(r'\bnss79\b', _raw_lower) or re.search(r'\bnss79c\b', _raw_lower):
-        _ds_priority = ["NSS79C"]
-    elif re.search(r'\bec4\b', _raw_lower):
-        _ds_priority = ["EC4"]
-    elif re.search(r'\bec5\b', _raw_lower):
-        _ds_priority = ["EC5"]
-    elif re.search(r'\bec6\b', _raw_lower):
-        _ds_priority = ["EC6"]
-    elif re.search(r'\bcpi2\b', _raw_lower):
-        _ds_priority = ["CPI2"]
-    elif re.search(r'\bwpi\b', _raw_lower) or ("wholesale" in _raw_lower and "price" in _raw_lower):
-        _ds_priority = ["WPI"]
-    elif re.search(r'\bplfs\b', _raw_lower) or "lfpr" in _raw_lower:
-        _ds_priority = ["PLFS"]
-    elif re.search(r'\basi\b', _raw_lower) or "annual survey of industries" in _raw_lower:
-        _ds_priority = ["ASI"]
-    elif re.search(r'\bnas\b', _raw_lower) or "national accounts" in _raw_lower:
-        _ds_priority = ["NAS"]
-    elif re.search(r'\basuse\b', _raw_lower):
-        _ds_priority = ["ASUSE"]
-    elif re.search(r'\besi\b', _raw_lower) or "energy statistics" in _raw_lower:
-        _ds_priority = ["ESI"]
-    elif re.search(r'\bcpialrl\b', _raw_lower) or "agricultural labourers" in _raw_lower:
-        _ds_priority = ["CPIALRL"]
-    elif re.search(r'\bhces\b', _raw_lower) or "consumption expenditure" in _raw_lower:
-        _ds_priority = ["HCES"]
-    elif re.search(r'\benvstat\b', _raw_lower) or "environment statistics" in _raw_lower:
-        _ds_priority = ["ENVSTAT"]
-    elif re.search(r'\bec\b', _raw_lower) or ("economic" in _raw_lower and "census" in _raw_lower):
-        _ds_priority = ["EC4", "EC5", "EC6"]
-    elif re.search(r'\bnss\b', _raw_lower):
-        _ds_priority = ["NSS77", "NSS78", "NSS79C"]
-    elif re.search(r'\bcpi\b', _raw_lower):
-        _ds_priority = ["CPI", "CPI2"]
-    elif re.search(r'\bcpialrl\b', _raw_lower) or ("consumer price" in _raw_lower and "agricultural" in _raw_lower):
-        _ds_priority = ["CPIALRL"]
-    elif re.search(r'\bnas\b', _raw_lower):
-        _ds_priority = ["NAS"]
-    elif re.search(r'\basi\b', _raw_lower):
-        _ds_priority = ["ASI"]
-    elif re.search(r'\bhces\b', _raw_lower):
-        _ds_priority = ["HCES"]
-    elif re.search(r'\biip\b', _raw_lower):
-        _ds_priority = ["IIP"]
-    elif re.search(r'\brbi\b', _raw_lower):
-        _ds_priority = ["RBI"]
-    elif re.search(r'\baishe\b', _raw_lower) or ("higher education" in _raw_lower and "survey" in _raw_lower):
-        _ds_priority = ["AISHE"]
-    elif re.search(r'\bnfhs\b', _raw_lower) or ("family health" in _raw_lower and "survey" in _raw_lower):
-        _ds_priority = ["NFHS"]
-    elif re.search(r'\btus\b', _raw_lower) or ("time use" in _raw_lower and "survey" in _raw_lower):
-        _ds_priority = ["TUS"]
-    elif re.search(r'\besi\b', _raw_lower) or ("employment" in _raw_lower and "survey" in _raw_lower and "establishment" in _raw_lower):
-        _ds_priority = ["ESI"]
-    elif re.search(r'\benvstat\b', _raw_lower) or ("environment" in _raw_lower and "statistic" in _raw_lower):
-        _ds_priority = ["ENVSTAT"]
-    elif re.search(r'\basuse\b', _raw_lower):
-        _ds_priority = ["ASUSE"]
+    for pat, codes in _force_ds_map.items():
+        if re.search(pat, _raw_lower):
+            _ds_priority = codes
+            break
+            
+    if _ds_priority:
+        for i, r in enumerate(top_results):
+            if r["parent"] in _ds_priority:
+                if i > 0:
+                    top_results = [r] + [x for x in top_results if x["parent"] != r["parent"]][:2]
+                top_results[0]["score"] = max(x["score"] for x in top_results) + 1
+                break
     if _ds_priority:
         for i, r in enumerate(top_results):
             if r["parent"] in _ds_priority:

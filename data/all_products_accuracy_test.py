@@ -51,21 +51,34 @@ def evaluate_accuracy():
         raw_q = query
         q = raw_q # mock rewrite
         
-        # Priority mapping from predict()
+        # Priority mapping from predict() — MUST MIRROR sementic.py predict() exactly
         _raw_lower = raw_q.lower().strip()
         _force_ds = None
-        if re.search(r'\btus\b', _raw_lower) or "time use" in _raw_lower: _force_ds = ["TUS"]
-        elif re.search(r'\bwpi\b', _raw_lower) or "wholesale price" in _raw_lower: _force_ds = ["WPI"]
-        elif re.search(r'\bplfs\b', _raw_lower) or "lfpr" in _raw_lower: _force_ds = ["PLFS"]
-        elif re.search(r'\besi\b', _raw_lower): _force_ds = ["ESI"]
-        elif re.search(r'\bcpi\b', _raw_lower): _force_ds = ["CPI", "CPI2"]
+        # Specific codes first (nss77 before nss, cpialrl before cpi, etc.)
+        if re.search(r'\bnss77\b', _raw_lower): _force_ds = ["NSS77"]
+        elif re.search(r'\bnss78\b', _raw_lower): _force_ds = ["NSS78"]
+        elif re.search(r'\bnss79c\b', _raw_lower) or "cams" in _raw_lower: _force_ds = ["NSS79C"]
+        elif re.search(r'\bnss79\b', _raw_lower) or "ayush" in _raw_lower: _force_ds = ["NSS79"]
+        elif re.search(r'\bnss\b', _raw_lower): _force_ds = ["NSS77", "NSS78", "NSS79C"]
+        elif re.search(r'\bnfhs\b', _raw_lower) or re.search(r'nfhs[-\s]?\d', _raw_lower) or "family health survey" in _raw_lower: _force_ds = ["NFHS"]
+        elif re.search(r'\baishe\b', _raw_lower): _force_ds = ["AISHE"]
+        elif re.search(r'\bcpialrl\b', _raw_lower) or ("consumer price" in _raw_lower and ("agricultural" in _raw_lower or "rural labour" in _raw_lower)): _force_ds = ["CPIALRL"]
+        elif re.search(r'\bcpi\b', _raw_lower) or "retail" in _raw_lower or "potatoes" in _raw_lower or "onions" in _raw_lower or "electricity cost" in _raw_lower or "subgroup index" in _raw_lower: _force_ds = ["CPI"]
+        elif re.search(r'\bplfs\b', _raw_lower) or re.search(r'\blfpr\b', _raw_lower): _force_ds = ["PLFS"]
+        elif re.search(r'\bnas\b', _raw_lower) or "national accounts" in _raw_lower: _force_ds = ["NAS"]
+        elif re.search(r'\btus\b', _raw_lower) or "time use" in _raw_lower or "icatus" in _raw_lower: _force_ds = ["TUS"]
+        elif re.search(r'\bwpi\b', _raw_lower) or ("wholesale" in _raw_lower and "price" in _raw_lower): _force_ds = ["WPI"]
         elif re.search(r'\biip\b', _raw_lower): _force_ds = ["IIP"]
         elif re.search(r'\basi\b', _raw_lower) or "annual survey of industries" in _raw_lower: _force_ds = ["ASI"]
-        elif re.search(r'\bnas\b', _raw_lower) or "national accounts" in _raw_lower: _force_ds = ["NAS"]
         elif re.search(r'\basuse\b', _raw_lower): _force_ds = ["ASUSE"]
-        elif re.search(r'\bcpialrl\b', _raw_lower) or "agricultural labourers" in _raw_lower: _force_ds = ["CPIALRL"]
+        elif re.search(r'\besi\b', _raw_lower) or "energy statistics" in _raw_lower: _force_ds = ["ESI"]
         elif re.search(r'\bhces\b', _raw_lower) or "consumption expenditure" in _raw_lower: _force_ds = ["HCES"]
         elif re.search(r'\benvstat\b', _raw_lower) or "environment statistics" in _raw_lower: _force_ds = ["ENVSTAT"]
+        elif re.search(r'\brbi\b', _raw_lower): _force_ds = ["RBI"]
+        elif re.search(r'\bec4\b', _raw_lower): _force_ds = ["EC4"]
+        elif re.search(r'\bec5\b', _raw_lower): _force_ds = ["EC5"]
+        elif re.search(r'\bec6\b', _raw_lower): _force_ds = ["EC6"]
+        elif re.search(r'\bec\b', _raw_lower) or ("economic" in _raw_lower and "census" in _raw_lower): _force_ds = ["EC4", "EC5", "EC6"]
         
         top_results = sementic.search_indicators(q)
         
@@ -84,31 +97,31 @@ def evaluate_accuracy():
         
         # 1. Dataset Accuracy
         ds_acc = 1.0 if pred_ds == actual_ds else 0.0
-        if not ds_acc and actual_ds in ["CPI", "CPI2"] and pred_ds in ["CPI", "CPI2"]:
-            ds_acc = 1.0 # Semantic equivalence for CPI variants
+        if not ds_acc and actual_ds == "CPI2" and pred_ds == "CPI":
+            ds_acc = 1.0  # CPI2 merged into CPI
             
         # 2. Indicator Accuracy
         ind_acc = 1.0 if pred_ind["name"].lower() == ind_name.lower() else 0.0
         
-        # 3. Filter Accuracy (Mandatory 4)
+        # 3. Filter Accuracy (Mandatory 4: Year, Sector, Gender, State)
         expected_filters = get_mandatory_filters_for_indicator(ind_code)
         
-        # Run filter selection
+        # Run full filter selection + ensure_required_filters_present (same as production)
         related_filters = [f for f in sementic.FILTERS if f["parent"] == pred_ind["code"]]
         grouped = {}
         for f in related_filters:
             grouped.setdefault(f["filter_name"], []).append(f)
 
-        pred_filter_names = set()
+        best_filters_list = []
         for fname, opts in grouped.items():
             best_opt = sementic.select_best_filter_option(q, fname, opts, sementic.cross_encoder)
-            pred_filter_names.add(fname)
-        
-        # Essential filter enforcement
-        best_filters_names = list(pred_filter_names)
-        # sementic.ensure_required_filters_present returns a list of objects, we just need names
-        # best_filters = sementic.ensure_required_filters_present(...) 
-        # But we can check sementic.ESSENTIAL_FILTERS_BY_DATASET
+            best_filters_list.append({"filter_name": fname, "option": best_opt["option"]})
+
+        # Call the real ensure_required_filters_present so essential filters are added
+        best_filters_list = sementic.ensure_required_filters_present(
+            best_filters_list, pred_ds, grouped, q, sementic.cross_encoder
+        )
+        pred_filter_names = {f["filter_name"] for f in best_filters_list} # sementic.ensure_required_filters_present returns a list of objects, we just need names
         
         if expected_filters:
             match_count = sum(1 for ef in expected_filters if any(ef.lower() in pf.lower() for pf in pred_filter_names))

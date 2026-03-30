@@ -2226,7 +2226,14 @@ def predict():
         if re.search(pat, _raw_lower):
             _forced = codes
             break
-            
+
+    # Golden rule hard-force: if user explicitly typed UDISE, always return a UDISE result at #1.
+    if _forced == ["UDISE"]:
+        ds_best = _search_dataset_only(q or raw_q, _forced)
+        if ds_best:
+            top_results = [ds_best] + [r for r in top_results if r["parent"] != ds_best["parent"]][:2]
+            ds_best["score"] = max((r.get("score", 0) for r in top_results), default=0) + 1
+
     if _forced and not any(r["parent"] in _forced for r in top_results):
         ds_best = _search_dataset_only(q or raw_q, _forced)
         if ds_best:

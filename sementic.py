@@ -2044,7 +2044,7 @@ else:
 # ================================
 # SEARCH
 # ================================
-def search_indicators(query, top_k=25, max_products=3):
+def search_indicators(query, top_k=25, max_products=3, raw_query=None):
     """Query ke hisaab se semantic search karo (Qdrant/FAISS). Cross-encoder rerank, CPI conflict resolve. Har dataset se max 1 indicator. Top max_products return."""
     q_vec = bi_encoder.encode([clean_text(query)], convert_to_numpy=True)
     q_vec /= np.linalg.norm(q_vec, axis=1, keepdims=True)
@@ -2059,6 +2059,16 @@ def search_indicators(query, top_k=25, max_products=3):
     scores = cross_encoder.predict([(query, c["name"] + " " + c.get("desc", "")) for c in candidates])
     for i, c in enumerate(candidates):
         c["score"] = float(scores[i])
+
+    # Golden rule: UDISE rerank boost ONLY when user's raw query indicates UDISE.
+    _intent_src = (raw_query or "").lower()
+    _udise_intent = (raw_query is not None) and (
+        bool(re.search(r"\budise\b", _intent_src) or "udise+" in _intent_src)
+    )
+    if _udise_intent:
+        for c in candidates:
+            if c.get("parent") == "UDISE":
+                c["score"] = c["score"] + 5.0
 
     candidates.sort(key=lambda x: x["score"], reverse=True)
 
@@ -2180,7 +2190,7 @@ def predict():
     print("RAW :", raw_q)
     print("LLM :", q)
 
-    top_results = search_indicators(q)
+    top_results = search_indicators(q, raw_query=raw_q)
 
     # 2. Force-Inclusion Logic (Isolation) - STRIcT CONTEXT
     _force_ds_map = {

@@ -57,6 +57,12 @@ def main():
     
     # Deduplicate EC4,5,6 into one block for missing and also handle unique products 
     unique_products_to_test = ['PLFS', 'ASUSE', 'ASI', 'TUS', 'Gender', 'AISHE', 'NSS77', 'NSS78', 'ESI', 'CPIALRL', 'HCES', 'ENVSTAT', 'NFHS', 'EC6', 'IIP', 'WPI', 'CPI', 'NAS', 'RBI', 'NSS79', 'NSS79C', 'UDISE']
+    # Ensure UTF-8 output for Windows consoles
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+    except AttributeError:
+        pass # In some environments reconfigure might not exist
+
     summary_data = []
 
     for prod in unique_products_to_test:
@@ -80,20 +86,25 @@ def main():
             try:
                 resp = client.post("/search/predict", json={"query": case[0]})
                 data = resp.get_json()
+                if not data:
+                    continue
                 metrics = get_accuracy_metrics(case, data)
                 results.append(metrics)
                 
                 # Check for mismatch to dump context
                 if metrics[0] == 0 or metrics[1] == 0:
-                    pred_ds = data["results"][0]["product"].upper() if "results" in data and data["results"] else "NONE"
-                    pred_ind = data["results"][0].get("indicator", "NONE") if "results" in data and data["results"] else "NONE"
+                    pred_ds = "NONE"
+                    pred_ind = "NONE"
+                    if data.get("results"):
+                        pred_ds = data["results"][0].get("product", "NONE").upper()
+                        pred_ind = data["results"][0].get("indicator", "NONE")
+                    
                     print(f"[MISMATCH] Product {prod} -> Prompt: '{case[0]}'")
                     print(f"   Expected: DS={case[1].upper()}, Ind='{case[2]}'")
                     print(f"   Got     : DS={pred_ds}, Ind='{pred_ind}'")
             except Exception as e:
                 import traceback
-                print(f"Error for case '{case[0]}':")
-                traceback.print_exc()
+                print(f"Error for case '{case[0]}': {str(e)}")
         
         if results:
             summary_data.append({

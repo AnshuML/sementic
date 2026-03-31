@@ -2155,6 +2155,16 @@ def search_indicators(query, top_k=25, max_products=3, raw_query=None, forced_ds
                 if any(k in _q_lower for k in ["participation", "percentage", "proportion", "rate"]):
                     if "percentage" in c["name"].lower(): c["score"] += 2.0
                     if "minutes spent" in c["name"].lower(): c["score"] -= 1.0
+                
+                # TUS Category-awareness (v11 surgical)
+                if any(k in _q_lower for k in ["social group", "sc", "st", "obc", "scheduled caste", "scheduled tribe", "backward class"]):
+                    if "social group" in c["name"].lower(): c["score"] += 4.0
+                if "marital" in _q_lower:
+                    if "marital status" in c["name"].lower(): c["score"] += 4.0
+                if any(k in _q_lower for k in ["education", "literacy", "schooling"]):
+                    if "level of education" in c["name"].lower(): c["score"] += 4.0
+                if "quintile" in _q_lower or "umpce" in _q_lower:
+                    if "umpce" in c["name"].lower(): c["score"] += 4.0
 
     # 2. ASI vs NAS Collision (Industrial/Factory terminology)
     if any(k in _q_lower for k in ["factory", "industry", "manufacturing", "industrial", "asi"]):
